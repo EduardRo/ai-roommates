@@ -191,7 +191,7 @@ onMounted(async () => {
     live2dModel.anchor.set(0.5, 0.5);
     // Example positioning - you'll likely want to adjust these based on your 3-character layout
     live2dModel.x = app.screen.width / 2;
-    live2dModel.y = app.screen.height * 0.8; // Adjust Y position
+    live2dModel.y = app.screen.height * 1.7; // Adjust Y position
     live2dModel.scale.set(0.25); // Adjust scale
     live2dModel.interactionManager.enabled = false;
 
