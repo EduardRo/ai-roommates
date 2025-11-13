@@ -11,9 +11,9 @@
     "format": "prettier --write src/"
   },
   "dependencies": {
-    "@zennomi/pixi-live2d-display": "^0.4.1",
+    "easy-live2d": "^0.1.0",
     "pinia": "^3.0.3",
-    "pixi.js": "^7.4.3",
+    "pixi.js": "^8.0.0",
     "vue": "^3.5.17",
     "vue-router": "^4.5.1"
   },

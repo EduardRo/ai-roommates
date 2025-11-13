@@ -4,9 +4,10 @@ import { RouterLink, RouterView } from 'vue-router'
 </script>
 
 <template>
+  <!-- nn
   <header>
 
-    <!--
+
     <div class="wrapper">
 
 
@@ -14,12 +15,12 @@ import { RouterLink, RouterView } from 'vue-router'
         <RouterLink to="/">Home</RouterLink>
         <RouterLink to="/about">About</RouterLink>
       </nav>
-    </div> -->
+    </div>
   </header>
-
+  -->
   <RouterView />
 </template>
-
+<!--
 <style scoped>
 header {
   line-height: 0;
@@ -83,3 +84,4 @@ nav a:first-of-type {
   }
 }
 </style>
+-->

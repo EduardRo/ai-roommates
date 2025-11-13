@@ -1,7 +1,12 @@
 <!-- src/components/DebateCharacter.vue -->
 <script setup>
-import { onMounted, ref, watch, onUnmounted } from 'vue';
-import { getAudio } from '@/services/personaService'; // Reuse your existing audio service
+import { onMounted, onUnmounted, ref, watch } from 'vue';
+// Import the function to get the shared app and the reactive flag
+import { getSharedPixiApp, isInitialized } from '@/composables/usePixiApp';
+// ✅ Direct import of Live2DModel (avoids global PIXI.live2d registration issues)
+import { Live2DModel } from '@zennomi/pixi-live2d-display';
+// Import your character-specific rendering config
+import { characterRenderConfig } from '@/config/characterRenderConfig'; // Adjust path as needed
 
 const props = defineProps({
   characterId: {
@@ -12,234 +17,147 @@ const props = defineProps({
     type: String,
     required: true
   },
-  // Optional: Pass character-specific settings if needed
-  // voiceConfig: Object,
-  // animationConfig: Object
 });
 
-const emit = defineEmits(['speakingStarted', 'speakingEnded']);
-
-const canvas = ref(null);
-const isSpeaking = ref(false);
-const isThinking = ref(false);
-
 let live2dModel = null;
-let app = null;
+const hasAttemptedLoad = ref(false); // Flag to prevent multiple load attempts
 
-// Function to handle incoming speech data for this character
-const handleSpeech = async (text, audioB64, audioUrl) => {
-  if (!text) return;
+// Function to load and setup the model
+const loadModel = async () => {
+  if (hasAttemptedLoad.value) return; // Prevent running multiple times
+  hasAttemptedLoad.value = true;
 
-  console.log(`[DebateCharacter:${props.characterId}] Handling speech`);
-  isSpeaking.value = true;
-  emit('speakingStarted', props.characterId);
-
-  // Reset mouth parameter before starting
-  setParameterValue('ParamMouthOpenY', 0);
-
-  try {
-    // Use your existing getAudio function - it handles audio_b64 and audio_url internally
-    // If audioUrl is provided and audioB64 is null, getAudio should fall back to URL
-    const audio = await getAudio(text, audioB64);
-    if (!audio) {
-      console.warn(`[DebateCharacter:${props.characterId}] No audio generated, skipping animation.`);
-      finishSpeaking();
-      return;
-    }
-
-    // Start playing audio
-    const playPromise = audio.play();
-    const startTime = performance.now();
-    const mouthMin = 0.2;
-    const mouthMax = 0.8;
-
-    let animIndex = 0;
-    // Assuming animationCommands are sent in the message, which they currently are not.
-    // We'll focus on basic lip-sync for now using the text.
-    // If animation commands are sent later, they can be used here.
-    const animationCommands = []; // Placeholder - you might receive these in the future
-    const totalCommands = animationCommands.length;
-    const stepDuration = 100;
-    let animationFrameId = null;
-    let isAnimating = true;
-
-    // Estimate duration based on text length if audio duration is unavailable
-    const estimatedDuration = Math.max(3, text.length / 12);
-    const maxAnimationTime = estimatedDuration * 1000;
-
-    console.log(`[DebateCharacter:${props.characterId}] Estimated duration: ${estimatedDuration}s for ${text.length} chars`);
-
-    const stopAnimation = () => {
-      if (!isAnimating) return;
-      isAnimating = false;
-      if (animationFrameId !== null) {
-        cancelAnimationFrame(animationFrameId);
-        animationFrameId = null;
-      }
-      setParameterValue('ParamMouthOpenY', 0);
-      console.log(`[DebateCharacter:${props.characterId}] Animation stopped`);
-    };
-
-    const animate = (time) => {
-      if (!isAnimating) return;
-
-      const elapsed = time - startTime;
-
-      if (elapsed > maxAnimationTime) {
-        console.log(`[DebateCharacter:${props.characterId}] Reached max animation time (${elapsed}ms)`);
-        stopAnimation();
-        finishSpeaking();
-        return;
-      }
-
-      // Check if audio has ended
-      if (audio.ended || (typeof audio.paused !== 'undefined' && audio.paused && elapsed > 1000)) { // Small delay to account for play() async
-        console.log(`[DebateCharacter:${props.characterId}] Audio ended detected`);
-        stopAnimation();
-        finishSpeaking();
-        return;
-      }
-
-      // Basic lip-sync based on time
-      const t = (elapsed % 600) / 600; // Oscillate every 600ms
-      const mouthValue = mouthMin + (mouthMax - mouthMin) * Math.abs(Math.sin(Math.PI * t));
-      setParameterValue('ParamMouthOpenY', mouthValue);
-
-      // Process animation commands if available
-      if (totalCommands > 0) {
-        const commandsPerStep = Math.ceil(totalCommands / (maxAnimationTime / stepDuration));
-        for (let i = 0; i < commandsPerStep && animIndex < totalCommands; i++, animIndex++) {
-          const cmd = animationCommands[animIndex];
-          if (cmd.type === 'setParameter') {
-            setParameterValue(cmd.payload.id, cmd.payload.value);
-          }
-        }
-      }
-
-      animationFrameId = requestAnimationFrame(animate);
-    };
-
-    if (playPromise && typeof playPromise.then === 'function') {
-      try {
-        await playPromise;
-      } catch (err) {
-        console.error(`[DebateCharacter:${props.characterId}] Play failed:`, err);
-        stopAnimation();
-        finishSpeaking();
-        return;
-      }
-    }
-
-    animationFrameId = requestAnimationFrame(animate);
-
-  } catch (error) {
-    console.error(`[DebateCharacter:${props.characterId}] Error during speech:`, error);
-    finishSpeaking();
-  }
-};
-
-const finishSpeaking = () => {
-  isSpeaking.value = false;
-  emit('speakingEnded', props.characterId);
-  console.log(`[DebateCharacter:${props.characterId}] Finished speaking`);
-};
-
-// Watch for speech events targeted at this character
-// The parent component will call this function when a message arrives for this character
-const onReceiveSpeech = (data) => {
-  handleSpeech(data.text, data.audio_b64, data.audio_url); // Use the correct field names from backend
-};
-
-// Define setParameterValue function
-function setParameterValue(paramId, value) {
-  if (!live2dModel?.internalModel?.coreModel) {
-    console.error(`[SetParameter:${props.characterId}] Model not ready for ${paramId}`);
-    return;
-  }
-  try {
-    live2dModel.internalModel.coreModel.setParameterValueById(paramId, value);
-    // console.log(`[SetParameter:${props.characterId}] Set ${paramId}=${value}`); // Optional: remove for performance
-  } catch (e) {
-    console.error(`[SetParameter:${props.characterId}] Error setting ${paramId}: ${e}`);
-  }
-}
-
-// Setup Live2D model
-onMounted(async () => {
-  if (typeof PIXI === 'undefined') {
-    console.error(`[DebateCharacter:${props.characterId}] PIXI not loaded`);
+  const app = getSharedPixiApp();
+  if (!app) {
+    console.error(`[DebateCharacter:${props.characterId}] Shared PixiJS app not available during load attempt.`);
+    // Reset flag to allow retry if app becomes available later (though unlikely in this flow)
+    hasAttemptedLoad.value = false;
     return;
   }
 
-  try {
-    // Initialize PIXI Application
-    app = new PIXI.Application({
-      view: canvas.value,
-      autoStart: true,
-      backgroundAlpha: 0,
-      resizeTo: canvas.value.parentElement
-    });
+  console.log(`[DebateCharacter:${props.characterId}] Attempting to load model: ${props.modelPath}`);
 
-    // Load Live2D Model
-    // Note: You might need to adjust the import path for PIXI.live2d depending on your setup
-    // This assumes pixi-live2d-display is correctly installed and configured
-    // eslint-disable-next-line no-undef
-    live2dModel = await PIXI.live2d.Live2DModel.from(props.modelPath, { autoInteract: false });
+  try {
+    // ✅ Direct use of imported Live2DModel.from (no global reference needed)
+    live2dModel = await Live2DModel.from(props.modelPath, { autoInteract: false });
+
+    if (!live2dModel) {
+      throw new Error(`Failed to load model from ${props.modelPath}`);
+    }
+
+    // --- Apply Character-Specific Configuration ---
+    const config = characterRenderConfig[props.characterId];
+    if (config) {
+      // Apply anchor point (determines which part of the model is positioned)
+      live2dModel.anchor.set(config.anchor.x, config.anchor.y);
+
+      // Get the dimensions of the shared application's view (the canvas)
+      // These should be available if the app is truly initialized
+      const appWidth = app.screen.width;
+      const appHeight = app.screen.height;
+
+      // Calculate position based on the shared app's dimensions and the config
+      live2dModel.x = appWidth * config.position.x; // e.g., config.position.x = 0.25 for 25% from left
+      live2dModel.y = appHeight * config.position.y; // e.g., config.position.y = 0.8 for 80% from top
+
+      // Apply scale
+      live2dModel.scale.set(config.scale.x, config.scale.y);
+
+      console.log(`[DebateCharacter:${props.characterId}] Applied config: pos (${live2dModel.x}, ${live2dModel.y}), scale (${live2dModel.scale.x}, ${live2dModel.scale.y})`);
+    } else {
+      console.warn(`[DebateCharacter:${props.characterId}] No render config found in characterRenderConfig.js, using defaults.`);
+      // Apply some sensible defaults if no config is found
+      live2dModel.anchor.set(0.5, 1.0); // Bottom center anchor
+      live2dModel.x = app.screen.width / 2; // Center horizontally
+      live2dModel.y = app.screen.height * 0.8; // Near bottom vertically
+      live2dModel.scale.set(0.3); // Default scale
+    }
+    // --- End Configuration ---
+
+    // Add the loaded model to the SHARED stage
     app.stage.addChild(live2dModel);
 
-    // Position and scale the model (adjust as needed for your layout)
-    live2dModel.anchor.set(0.5, 0.5);
-    // Example positioning - you'll likely want to adjust these based on your 3-character layout
-    live2dModel.x = app.screen.width / 2;
-    live2dModel.y = app.screen.height * 1.7; // Adjust Y position
-    live2dModel.scale.set(0.25); // Adjust scale
-    live2dModel.interactionManager.enabled = false;
+    // --- Interaction Manager Safety Check ---
+    // Check if the interactionManager property exists on the live2dModel object itself
+    // before trying to access or modify its properties.
+    if (live2dModel.interactionManager && typeof live2dModel.interactionManager === 'object') {
+      console.log(`[DebateCharacter:${props.characterId}] Disabling interactionManager.`);
+      // The property to disable interaction might be different depending on the pixi-live2d-display version
+      // Common ones are: enabled, autoInteract, etc.
+      // For now, let's try 'enabled' which is common.
+      if (typeof live2dModel.interactionManager.enabled !== 'undefined') {
+        live2dModel.interactionManager.enabled = false;
+      } else {
+        console.log(`[DebateCharacter:${props.characterId}] interactionManager.enabled property not found.`);
+      }
+    } else {
+      console.log(`[DebateCharacter:${props.characterId}] interactionManager not found or not an object on model, skipping disable.`);
+    }
+    // --- End Safety Check ---
 
-    console.log(`[DebateCharacter:${props.characterId}] Live2D model loaded successfully`);
+    // ✅ Add ticker for animation (ensures models update/animate)
+    app.ticker.add((delta) => {
+      if (live2dModel) {
+        live2dModel.update(delta);
+      }
+    });
 
-    // Optional: Log initial parameters for debugging
-    // const debugParams = live2dModel.internalModel?.parameters;
-    // if (debugParams) {
-    //   debugParams.ids.forEach((id, index) => {
-    //     console.log(`[DebateCharacter:${props.characterId}] Initial ${id}: ${debugParams.values[index]}`);
-    //   });
-    // }
+    console.log(`[DebateCharacter:${props.characterId}] Live2D model loaded and added to shared stage successfully`);
 
   } catch (error) {
     console.error(`[DebateCharacter:${props.characterId}] Error loading Live2D model:`, error);
+    // Reset flag on error to allow retry if needed (e.g., if network issue)
+    hasAttemptedLoad.value = false;
   }
+};
+
+// Watch for the shared app initialization
+// This will run when isInitialized becomes true
+watch(isInitialized, (initialized) => {
+  if (initialized) {
+    console.log(`[DebateCharacter:${props.characterId}] Shared app is now initialized, attempting to load model.`);
+    loadModel(); // Attempt to load the model now that the app is ready
+  }
+}, { immediate: true }); // immediate: true ensures the watcher runs immediately when component is created
+
+// Setup Live2D model (this is now just a placeholder or for cleanup)
+onMounted(async () => {
+  // The actual loading is handled by the watch on isInitialized
+  // This hook can be used for other setup if needed, but model loading is deferred
+  console.log(`[DebateCharacter:${props.characterId}] Mounted, waiting for shared app...`);
 });
 
 onUnmounted(() => {
-  // Cleanup PIXI Application and WebSocket resources if needed
-  if (app) {
-    app.destroy(true);
-    console.log(`[DebateCharacter:${props.characterId}] PIXI app destroyed`);
+  // Get the shared app instance again
+  const app = getSharedPixiApp(); // Use the helper function
+  if (app && live2dModel) {
+    // Remove the model from the shared stage
+    if (app.stage.children.includes(live2dModel)) {
+      app.stage.removeChild(live2dModel);
+    }
+    // Destroy the model's resources
+    live2dModel.destroy({ children: true, texture: true }); // v7 destroy options
+    console.log(`[DebateCharacter:${props.characterId}] Model removed from stage and destroyed`);
   }
-  // Note: WebSocket connection is managed by parent, not individual characters
 });
 
-// Expose the speech handler so the parent can call it
-defineExpose({
-  characterId: props.characterId,
-  onReceiveSpeech
-});
+// Expose methods if needed by parent
+// defineExpose({ ... });
 </script>
 
 <template>
-  <div class="debate-character" :class="{ speaking: isSpeaking, thinking: isThinking }">
-    <h3>{{ characterId }}</h3> <!-- Display character ID for now, you can fetch the name from props if available -->
-    <canvas ref="canvas" class="live2d-canvas"></canvas>
-    <div class="status-indicator">
-      <span v-if="isSpeaking" class="status-speaking">🎤 Speaking</span>
-      <span v-else-if="isThinking" class="status-thinking">🤔 Thinking</span>
-      <span v-else class="status-idle">😴 Idle</span>
-    </div>
+  <!-- This component no longer renders its own canvas -->
+  <!-- You can add UI elements here if needed, but the visual model is on the shared canvas -->
+  <div class="character-ui-placeholder" :data-character-id="characterId">
+    <!-- Example: Character name, status indicator -->
+    <h4>{{ characterId }}</h4>
+    <!-- Add other UI elements if required -->
   </div>
 </template>
 
 <style scoped>
-.debate-character {
+.character-ui-placeholder {
+  /* Style for the character's UI placeholder if shown */
   display: inline-block;
   margin: 10px;
   padding: 10px;
@@ -247,41 +165,12 @@ defineExpose({
   border-radius: 8px;
   text-align: center;
   background-color: #f9f9f9;
-  transition: border-color 0.3s;
+  /* Hide by default if you don't want these boxes */
+  display: none;
 }
 
-.debate-character.speaking {
-  border-color: #4CAF50;
-  background-color: #e8f5e9;
-}
-
-.debate-character.thinking {
-  border-color: #FF9800;
-  background-color: #fff3e0;
-}
-
-.live2d-canvas {
-  width: 200px;
-  height: 300px;
-  border: 1px solid #ddd;
-  border-radius: 4px;
-}
-
-.status-indicator {
-  margin-top: 5px;
-}
-
-.status-speaking {
-  color: #4CAF50;
-  font-weight: bold;
-}
-
-.status-thinking {
-  color: #FF9800;
-  font-weight: bold;
-}
-
-.status-idle {
-  color: #999;
+.character-ui-placeholder h4 {
+  margin: 0;
+  font-size: 1em;
 }
 </style>
