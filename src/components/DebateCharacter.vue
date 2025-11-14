@@ -7,6 +7,8 @@ import { getSharedPixiApp, isInitialized } from '@/composables/usePixiApp';
 import { Live2DModel } from '@zennomi/pixi-live2d-display';
 // Import your character-specific rendering config
 import { characterRenderConfig } from '@/config/characterRenderConfig'; // Adjust path as needed
+// Import your existing audio service
+import { getAudio } from '@/services/personaService'; // Adjust path as needed
 
 const props = defineProps({
   characterId: {
@@ -21,6 +23,140 @@ const props = defineProps({
 
 let live2dModel = null;
 const hasAttemptedLoad = ref(false); // Flag to prevent multiple load attempts
+let isSpeaking = ref(false); // Reactive state to track if this character is speaking
+
+// Function to handle incoming speech data for this character
+// This will be called by the parent component (DebateRoom.vue) when a message arrives for this character
+const onReceiveSpeech = async (data) => {
+  console.log(`[DebateCharacter:${props.characterId}] onReceiveSpeech called with data:`, data);
+  const { text, audio_b64 /*, audio_url */ } = data; // Destructure the received data
+
+  // Check if the character is already speaking to prevent overlap
+  if (isSpeaking.value) {
+    console.warn(`[DebateCharacter:${props.characterId}] Already speaking, ignoring new speech data.`);
+    return; // Exit if already processing speech
+  }
+
+  if (!text) {
+    console.warn(`[DebateCharacter:${props.characterId}] Received speech data with no text.`);
+    return; // Exit if no text to speak
+  }
+
+  console.log(`[DebateCharacter:${props.characterId}] Processing speech:`, text.substring(0, 50) + '...');
+
+  // Set speaking flag
+  isSpeaking.value = true;
+
+  try {
+    // Use your existing getAudio function - it handles audio_b64 and audio_url internally
+    const audio = await getAudio(text, audio_b64);
+    if (!audio) {
+      console.warn(`[DebateCharacter:${props.characterId}] No audio generated, skipping animation.`);
+      isSpeaking.value = false; // Reset flag
+      return;
+    }
+
+    // Start playing audio
+    const playPromise = audio.play();
+    const startTime = performance.now();
+    const mouthMin = 0.1; // <--- 🔥 THESE VALUES CONTROL THE MOUTH MOVEMENT AMPLITUDE
+    const mouthMax = 0.7; // <--- 🔥
+
+    let animIndex = 0;
+    // Assuming animationCommands are sent in the message, which they currently are not.
+    // We'll focus on basic lip-sync for now using the text.
+    // If animation commands are sent later, they can be used here.
+    const animationCommands = []; // Placeholder - you might receive these in the future
+    const totalCommands = animationCommands.length;
+    const stepDuration = 100; // <--- 🔥 THIS CONTROLS THE TIMING OF COMMAND PROCESSING (IF USED)
+    let animationFrameId = null;
+    let isAnimating = true;
+
+    // Estimate duration based on text length if audio duration is unavailable
+    const estimatedDuration = Math.max(3, text.length / 12); // <--- 🔥 ESTIMATED DURATION BASED ON TEXT LENGTH
+    const maxAnimationTime = estimatedDuration * 1000;      // <--- 🔥 CONVERTED TO MILLISECONDS
+
+    console.log(`[DebateCharacter:${props.characterId}] Estimated duration: ${estimatedDuration}s for ${text.length} chars`);
+
+    const stopAnimation = () => {
+      if (!isAnimating) return;
+      isAnimating = false;
+      if (animationFrameId !== null) {
+        cancelAnimationFrame(animationFrameId);
+        animationFrameId = null;
+      }
+      // Reset mouth parameter when animation stops
+      if (live2dModel && live2dModel.internalModel?.coreModel) {
+        const currentValue = live2dModel.internalModel.coreModel.getParameterValueById('ParamMouthOpenY');
+        if (currentValue > 0) { // Only reset if it was open
+          live2dModel.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', 0);
+          console.log(`[DebateCharacter:${props.characterId}] Reset mouth parameter`);
+        }
+      }
+      isSpeaking.value = false; // Reset speaking flag
+      console.log(`[DebateCharacter:${props.characterId}] Animation stopped`);
+    };
+
+    const animate = (time) => {
+      if (!isAnimating) return;
+
+      const elapsed = time - startTime;
+
+      if (elapsed > maxAnimationTime) {
+        console.log(`[DebateCharacter:${props.characterId}] Reached max animation time (${elapsed}ms)`);
+        stopAnimation();
+        return;
+      }
+
+      // Check if audio has ended
+      if (audio.ended || (typeof audio.paused !== 'undefined' && audio.paused && elapsed > 1000)) { // Small delay to account for play() async
+        console.log(`[DebateCharacter:${props.characterId}] Audio ended detected`);
+        stopAnimation();
+        return;
+      }
+
+      // Basic lip-sync based on time - this creates a simple open/close oscillation
+      const t = (elapsed % 600) / 600; // Oscillate every 600ms
+      const mouthValue = mouthMin + (mouthMax - mouthMin) * Math.abs(Math.sin(Math.PI * t));
+
+      // Apply the mouth parameter to the Live2D model
+      if (live2dModel && live2dModel.internalModel?.coreModel) {
+        live2dModel.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', mouthValue);
+        // console.log(`[DebateCharacter:${props.characterId}] Set mouth to ${mouthValue}`); // Optional: remove for performance
+      }
+
+      // Process animation commands if available (placeholder for future use)
+      if (totalCommands > 0) {
+        const commandsPerStep = Math.ceil(totalCommands / (maxAnimationTime / stepDuration));
+        for (let i = 0; i < commandsPerStep && animIndex < totalCommands; i++, animIndex++) {
+          const cmd = animationCommands[animIndex];
+          if (cmd.type === 'setParameter' && live2dModel && live2dModel.internalModel?.coreModel) {
+            live2dModel.internalModel.coreModel.setParameterValueById(cmd.payload.id, cmd.payload.value);
+          }
+        }
+      }
+
+      animationFrameId = requestAnimationFrame(animate);
+    };
+
+    if (playPromise && typeof playPromise.then === 'function') {
+      try {
+        await playPromise;
+      } catch (err) {
+        console.error(`[DebateCharacter:${props.characterId}] Play failed:`, err);
+        stopAnimation();
+        return;
+      }
+    }
+
+    animationFrameId = requestAnimationFrame(animate);
+
+  } catch (error) {
+    console.error(`[DebateCharacter:${props.characterId}] Error during speech:`, error);
+    isSpeaking.value = false; // Ensure flag is reset on error
+  }
+};
+
 
 // Function to load and setup the model
 const loadModel = async () => {
@@ -44,6 +180,12 @@ const loadModel = async () => {
     if (!live2dModel) {
       throw new Error(`Failed to load model from ${props.modelPath}`);
     }
+
+    // --- CRITICAL FIX: Disable interaction on the model instance itself ---
+    // This prevents the PixiJS EventBoundary error by ensuring the root model object
+    // and its children are not considered interactive by the PixiJS event system.
+    live2dModel.eventMode = 'none'; // Modern PixiJS v7 way
+    // live2dModel.interactiveChildren = false; // Legacy PixiJS v6 way
 
     // --- Apply Character-Specific Configuration ---
     const config = characterRenderConfig[props.characterId];
@@ -77,18 +219,32 @@ const loadModel = async () => {
     // Add the loaded model to the SHARED stage
     app.stage.addChild(live2dModel);
 
-    // --- Interaction Manager Safety Check ---
+    // --- Interaction Manager Safety Check (FIXED) ---
     // Check if the interactionManager property exists on the live2dModel object itself
     // before trying to access or modify its properties.
+    // The error log shows: TypeError: Cannot set properties of undefined (setting 'enabled')
+    // This means live2dModel.interactionManager was undefined, but the code still tried to access .enabled
+    // We need to check if live2dModel.interactionManager itself exists and is an object.
+    // Inside DebateCharacter.vue loadModel function, replacing the problematic block
     if (live2dModel.interactionManager && typeof live2dModel.interactionManager === 'object') {
-      console.log(`[DebateCharacter:${props.characterId}] Disabling interactionManager.`);
-      // The property to disable interaction might be different depending on the pixi-live2d-display version
-      // Common ones are: enabled, autoInteract, etc.
-      // For now, let's try 'enabled' which is common.
-      if (typeof live2dModel.interactionManager.enabled !== 'undefined') {
-        live2dModel.interactionManager.enabled = false;
+      console.log(`[DebateCharacter:${props.characterId}] Attempting to disable interactionManager.`);
+      // Check if the 'enabled' property exists AND is not undefined/null before trying to set it
+      if (Object.prototype.hasOwnProperty.call(live2dModel.interactionManager, 'enabled') &&
+        typeof live2dModel.interactionManager.enabled !== 'undefined' &&
+        live2dModel.interactionManager.enabled !== null) {
+        // Perform the assignment with an extra check to ensure interactionManager still exists
+        if (live2dModel.interactionManager && typeof live2dModel.interactionManager === 'object') {
+          try {
+            live2dModel.interactionManager.enabled = false;
+            console.log(`[DebateCharacter:${props.characterId}] interactionManager.enabled set to false.`);
+          } catch (e) {
+            console.warn(`[DebateCharacter:${props.characterId}] Could not set interactionManager.enabled:`, e.message);
+          }
+        } else {
+          console.warn(`[DebateCharacter:${props.characterId}] interactionManager disappeared during assignment attempt.`);
+        }
       } else {
-        console.log(`[DebateCharacter:${props.characterId}] interactionManager.enabled property not found.`);
+        console.log(`[DebateCharacter:${props.characterId}] interactionManager.enabled property does not exist or is undefined/null on the interactionManager object.`);
       }
     } else {
       console.log(`[DebateCharacter:${props.characterId}] interactionManager not found or not an object on model, skipping disable.`);
@@ -141,8 +297,12 @@ onUnmounted(() => {
   }
 });
 
-// Expose methods if needed by parent
-// defineExpose({ ... });
+// Expose the onReceiveSpeech method so the parent can call it
+defineExpose({
+  onReceiveSpeech,
+  // Add other methods you might need to expose to the parent
+  characterId: props.characterId, // Example: expose character ID
+});
 </script>
 
 <template>
